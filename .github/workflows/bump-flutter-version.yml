@@ -1,51 +1,49 @@
-name: Check Flutter versions
+name: Bump Flutter version
 
-# Polls the upstream Flutter release index, updates versions.json when a
-# new stable or beta build appears, commits the change directly to the
-# default branch, and kicks off the build workflow. Designed to run
-# unattended on a schedule.
+# Manual only. The Flutter version this repository publishes is pinned in
+# versions.json and never changes on its own; run this workflow to move the pin
+# to a different release. It validates the requested version against Flutter's
+# official release index, commits versions.json, and dispatches the build.
+#
+# You can also just edit versions.json by hand and push -- the build workflow
+# triggers on that path. This workflow exists so the bump can be done from the
+# Actions tab without a checkout.
 
 on:
-  schedule:
-    # Every hour, on the hour.
-    - cron: "0 * * * *"
   workflow_dispatch:
+    inputs:
+      flutter_version:
+        description: "Flutter version to pin (e.g. 3.44.8), or a channel name (stable / beta)."
+        required: true
+        default: "stable"
+        type: string
 
 permissions:
   contents: write
   actions: write
 
 concurrency:
-  group: check-flutter-versions
+  group: bump-flutter-version
   cancel-in-progress: false
 
 jobs:
-  check:
+  bump:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install jq
-        run: |
-          if ! command -v jq >/dev/null; then
-            sudo apt-get update
-            sudo apt-get install -y jq
-          fi
-
       - name: Update versions.json
-        run: bash scripts/update_flutter_versions.sh
+        run: bash scripts/set_flutter_version.sh "${{ inputs.flutter_version }}"
 
       - name: Show diff
         run: git --no-pager diff -- versions.json || true
 
       - name: Commit and push if changed
         id: commit
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if git diff --quiet -- versions.json; then
-            echo "No Flutter version changes."
+            echo "versions.json already pins this version; nothing to do."
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -53,16 +51,10 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Build a human-readable summary from the new versions.json so the
-          # commit message captures which channels moved.
-          summary=$(jq -r '
-            .images
-            | map("\(.tags | join("/")): \(.flutter_version)")
-            | join(", ")
-          ' versions.json)
+          pinned=$(jq -r '.images[0].flutter_version' versions.json)
 
           git add versions.json
-          git commit -m "chore: update Flutter versions ($summary)"
+          git commit -m "chore: pin Flutter ${pinned}"
           git push origin HEAD:${GITHUB_REF#refs/heads/}
 
           echo "changed=true" >> "$GITHUB_OUTPUT"
@@ -81,12 +73,10 @@ jobs:
         # time*, and a freshly pushed commit can take a few seconds to become
         # visible to that resolver. Dispatching immediately therefore races
         # the push: if the old tip is resolved, the build checks out the
-        # previous commit and rebuilds the previous Flutter version. (This is
-        # exactly how 3.44.3 was committed but never built -- the dispatch
-        # resolved to the prior 3.44.2 commit and rebuilt it under the
-        # latest/stable tags.) Wait until the API reports our pushed commit as
-        # the branch tip before dispatching, and fail loudly rather than
-        # dispatch a stale build if it never shows up.
+        # previous commit and rebuilds the previous Flutter version. Wait until
+        # the API reports our pushed commit as the branch tip before
+        # dispatching, and fail loudly rather than dispatch a stale build if it
+        # never shows up.
         run: |
           for attempt in $(seq 1 30); do
             remote_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${BRANCH}" --jq '.sha')

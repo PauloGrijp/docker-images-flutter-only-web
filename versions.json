@@ -1,16 +1,10 @@
 {
   "images": [
     {
-      "flutter_version": "3.47.5",
+      "flutter_version": "3.44.8",
       "tags": [
         "latest",
-        "stable"
-      ]
-    },
-    {
-      "flutter_version": "3.49.0-0.1.pre",
-      "tags": [
-        "beta"
+        "3.44"
       ]
     }
   ]

@@ -1,11 +1,12 @@
 name: Build and push Docker images
 
-# Reads the Flutter versions declared in versions.json, builds a
-# multi-arch (amd64 + arm64) image for each unique Flutter version, and
-# pushes it to GitHub Container Registry tagged with every channel tag
-# that points at it (latest, stable, beta, ...) as well as the literal
-# Flutter version. Runs whenever the inputs change, on a weekly cadence
-# to pick up base-image security updates, and on demand.
+# Reads the Flutter version(s) declared in versions.json, builds a linux/amd64
+# image for each one, smoke-tests it by building a real Flutter web app inside
+# the container, and pushes it to GitHub Container Registry tagged with the
+# literal Flutter version plus every alias in versions.json (latest, 3.44, ...).
+#
+# amd64 only: these images are meant to run as the `container:` of a GitHub
+# Actions job, and every GitHub-hosted runner used here is amd64.
 
 on:
   push:
@@ -35,7 +36,7 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/flutter
+  IMAGE_BASENAME: flutter-web
 
 jobs:
   prepare:
@@ -53,8 +54,7 @@ jobs:
           FILTER_VERSION: ${{ inputs.flutter_version }}
         run: |
           # Group entries that share a flutter_version so we build the
-          # image once and push it under every channel tag at the same
-          # time.
+          # image once and push it under every alias at the same time.
           matrix=$(jq -c '
             [
               .images
@@ -99,24 +99,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Free up disk space
-        # Flutter images are large; the default runner does not have
-        # enough headroom for a multi-arch buildx run with caching.
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: false
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: false
-          swap-storage: true
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -132,19 +114,25 @@ jobs:
         env:
           FLUTTER_VERSION: ${{ matrix.flutter_version }}
           CHANNEL_TAGS: ${{ toJson(matrix.tags) }}
-          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          OWNER: ${{ github.repository_owner }}
         run: |
+          # Registry paths must be lowercase; the GitHub owner name is not
+          # necessarily lowercase (PauloGrijp -> paulogrijp).
+          image="${REGISTRY}/$(tr '[:upper:]' '[:lower:]' <<<"$OWNER")/${IMAGE_BASENAME}"
+
           # Image tags must not contain '+'. Flutter uses '+' for build
           # metadata in some pre-releases; replace with '-' as the old
           # ci.sh did.
           version_tag="${FLUTTER_VERSION//+/-}"
 
-          tag_lines="${IMAGE}:${version_tag}"
+          tag_lines="${image}:${version_tag}"
           while read -r t; do
-            tag_lines+=$'\n'"${IMAGE}:${t}"
+            tag_lines+=$'\n'"${image}:${t}"
           done < <(jq -r '.[]' <<<"$CHANNEL_TAGS")
 
           {
+            echo "image=$image"
+            echo "primary=${image}:${version_tag}"
             echo "tags<<__EOF__"
             echo "$tag_lines"
             echo "__EOF__"
@@ -158,7 +146,7 @@ jobs:
         with:
           context: sdk
           file: sdk/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           provenance: false
           build-args: |
@@ -166,5 +154,42 @@ jobs:
           tags: ${{ steps.tags.outputs.tags }}
           # Per-version cache scope so the cache for one Flutter version
           # is not invalidated when another moves.
-          cache-from: type=gha,scope=flutter-${{ matrix.flutter_version }}
-          cache-to: type=gha,mode=max,scope=flutter-${{ matrix.flutter_version }}
+          cache-from: type=gha,scope=flutter-web-${{ matrix.flutter_version }}
+          cache-to: type=gha,mode=max,scope=flutter-web-${{ matrix.flutter_version }}
+
+      - name: Smoke test the pushed image
+        env:
+          IMAGE: ${{ steps.tags.outputs.primary }}
+        # Pull the image back from the registry (rather than testing a local
+        # build artifact) so the test covers what consumers will actually get,
+        # then build a real Flutter web app inside it.
+        run: |
+          docker pull "$IMAGE"
+          docker run --rm --workdir /tmp "$IMAGE" bash -euxo pipefail -c '
+            flutter --version
+            dart --version
+            flutter create smoke_test
+            cd smoke_test
+            flutter pub get
+            flutter analyze
+            flutter build web --release
+            test -f build/web/index.html
+            test -f build/web/main.dart.js
+          '
+
+      - name: Report to the job summary
+        env:
+          IMAGE: ${{ steps.tags.outputs.primary }}
+          ALL_TAGS: ${{ steps.tags.outputs.tags }}
+        run: |
+          size=$(docker image inspect "$IMAGE" --format '{{.Size}}' | numfmt --to=iec)
+          {
+            echo "### Flutter ${{ matrix.flutter_version }} (web only)"
+            echo
+            echo "Uncompressed image size: \`${size}\`"
+            echo
+            echo "Tags pushed:"
+            echo '```'
+            echo "$ALL_TAGS"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"

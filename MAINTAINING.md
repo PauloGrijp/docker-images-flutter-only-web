@@ -1,97 +1,131 @@
 # Maintaining this repository
 
-This document is for anyone running the build pipeline — i.e. the repository owner or maintainers of a fork. End users of the published images do not need to read this; see [`README.md`](./README.md) instead.
-
-The pipeline is designed to run unattended on GitHub Actions. In normal operation no human action is required: new Flutter releases are picked up, committed, built, and pushed automatically. The notes below cover the one-time setup, the moving parts, and the cases that eventually require manual attention.
+This document is for whoever runs the build pipeline. Consumers of the published image only need
+[`README.md`](./README.md).
 
 ## First-time setup
 
-One-time steps after forking this repository or transferring it:
+One-time steps for this repository (or a fork of it):
 
 1. **Enable GitHub Actions** under the *Actions* tab if it is not on by default.
-2. **Allow Actions to write to the repository.** Settings → Actions → General → *Workflow permissions* → "Read and write permissions". Required for the version checker to commit directly and to dispatch the build workflow.
-3. **Run the build at least once** — either let the next scheduled check fire or trigger **Build and push Docker images** manually from the Actions tab. This is what creates the `flutter` package under your user/organization on GHCR.
-4. **Make the package public** (optional but standard for this image): on the package page (`https://github.com/<owner>/docker-images-flutter/pkgs/container/flutter`) → *Package settings* → *Change visibility* → *Public*. Until you do this, pulls require `docker login ghcr.io`.
+2. **Allow Actions to write to the repository.** Settings → Actions → General → *Workflow
+   permissions* → "Read and write permissions". Required for **Bump Flutter version** to commit
+   `versions.json` and dispatch the build.
+3. **Run the build once.** Actions → **Build and push Docker images** → *Run workflow*. This is
+   what creates the `flutter-web` package under your account on GHCR.
+4. **Make the package public** (recommended): package page →
+   `https://github.com/users/PauloGrijp/packages/container/package/flutter-web` → *Package
+   settings* → *Change visibility* → *Public*. Until then, every consuming job must pass
+   `credentials:` to pull it.
+5. **Link the package to this repository** (also on the package settings page) so
+   `GITHUB_TOKEN` from this repo keeps push access and the package shows up on the repo sidebar.
 
-If you forked from `adrianjagielak/docker-images-flutter`, also update the image-source labels in [`sdk/Dockerfile`](./sdk/Dockerfile) and the badge / link URLs in [`README.md`](./README.md) to point at your fork. The registry path is derived from `${{ github.repository_owner }}` at build time, so no workflow change is needed for that.
+After forking, update the `org.opencontainers.image.source` label in
+[`sdk/Dockerfile`](./sdk/Dockerfile) and the URLs in `README.md`. The registry path itself is
+derived from `${{ github.repository_owner }}` (lowercased) at build time, so no workflow change is
+needed for that.
 
 ## How the automation works
-
-Two workflows keep this repository running without manual intervention.
-
-### `.github/workflows/check-flutter-versions.yml`
-
-Runs every two hours (and on demand). For each release channel it:
-
-1. Fetches `releases_linux.json` from Flutter's release index.
-2. Resolves the current `stable` and `beta` hashes to version strings.
-3. Rewrites [`versions.json`](./versions.json).
-4. If anything changed, commits the file directly to the default branch and dispatches the build workflow. The commit summary lists every channel/version pair (`chore: update Flutter versions (latest/stable: 3.x.y, beta: 3.x.y-N.N.pre)`).
-
-Because pushes made by `GITHUB_TOKEN` do not trigger downstream workflows, the build is started with an explicit `gh workflow run` call from the same job. A direct push (not via `GITHUB_TOKEN`) to `master` will trigger the build via the normal `push` event instead.
 
 ### `.github/workflows/build-and-push.yml`
 
 Triggered by:
 
-- pushes to the default branch that touch `versions.json`, `sdk/**`, or the workflow itself
-- the version checker after it commits a bump
-- a weekly cron (`Monday 05:00 UTC`) so base-image security updates land even when Flutter does not move
-- manual `workflow_dispatch`, with an optional `flutter_version` filter to rebuild just one entry
+- pushes to `master` touching `versions.json`, `sdk/**`, or the workflow itself
+- **Bump Flutter version** after it commits a new pin
+- a weekly cron (Monday 05:00 UTC) so Debian security updates land even when Flutter does not move
+- manual `workflow_dispatch`, with an optional `flutter_version` filter
 
-For each unique Flutter version in `versions.json` it builds a single multi-arch image and pushes it to GHCR under both its version tag and every channel tag that points at it. A per-Flutter-version `type=gha` cache keeps incremental builds fast without cross-version invalidation.
+For each entry in `versions.json` it builds one `linux/amd64` image, pushes it under the literal
+version tag plus every alias, then **pulls it back from the registry and smoke-tests it** by
+running `flutter create` → `pub get` → `analyze` → `build web --release` inside the container. A
+broken image therefore fails the build instead of quietly becoming `latest`.
 
-`arm64` is built via QEMU emulation on the same `ubuntu-latest` runner as `amd64`. This matches the original Cirrus setup. If `arm64` build time becomes painful, the matrix can be split across `ubuntu-latest` + `ubuntu-24.04-arm` with a separate manifest job.
+A per-Flutter-version `type=gha` cache scope keeps incremental builds fast without one version
+invalidating another's cache.
+
+There is no QEMU step: the image is amd64-only because it is meant to run on GitHub-hosted
+runners. If an arm64 variant is ever needed, add `ubuntu-24.04-arm` to the matrix and merge the
+two digests with a `docker buildx imagetools create` manifest job — do *not* reintroduce QEMU
+emulation for the Flutter build, it is painfully slow.
+
+### `.github/workflows/bump-flutter-version.yml`
+
+Manual only. Takes a version (`3.44.8`) or a channel name (`stable`, `beta`), validates it against
+Flutter's release index, rewrites `versions.json`, commits, and dispatches the build. Nothing in
+this repository updates the Flutter version on its own.
+
+Because pushes made by `GITHUB_TOKEN` do not trigger downstream workflows, the build is started
+with an explicit `gh workflow run` call. That call waits until the API reports the pushed commit as
+the branch tip before dispatching — `workflow_dispatch` resolves `--ref` to the tip *at dispatch
+time*, so dispatching immediately can race the push and rebuild the previous version.
+
+## Changing the Flutter version
+
+Either:
+
+```bash
+bash scripts/set_flutter_version.sh 3.44.8   # or: stable / beta
+git commit -am "chore: pin Flutter 3.44.8" && git push
+```
+
+or run **Bump Flutter version** from the Actions tab, which does the same thing on a runner.
+
+The script refuses versions that are not in Flutter's published release index, so a typo fails
+before the Docker build spends ten minutes on a `git clone --branch` that cannot succeed.
+
+To publish more than one version at a time (e.g. keep `3.44.8` alongside a newer stable), add a
+second object to the `images` array in `versions.json` by hand — the build matrix already supports
+it; only the helper script is single-version.
 
 ## Local development
 
-Build a single version locally:
-
 ```bash
-docker buildx build \
-    --platform linux/amd64,linux/arm64 \
-    --build-arg flutter_version=3.41.9 \
-    --tag ghcr.io/adrianjagielak/flutter:3.41.9 \
-    sdk
+docker build --build-arg flutter_version=3.44.8 -t flutter-web:3.44.8 sdk
+
+docker run --rm --workdir /tmp flutter-web:3.44.8 bash -c \
+    'flutter create demo && cd demo && flutter build web --release'
 ```
 
-Refresh `versions.json` against the upstream release index (requires `jq`):
-
-```bash
-bash scripts/update_flutter_versions.sh
-```
-
-Pin a Flutter version manually by editing `versions.json` and pushing to `master` — the build workflow will run.
+On an Apple Silicon Mac add `--platform linux/amd64`; the build runs under emulation and is slow.
 
 ## Dependencies that may need attention over time
 
-### `ghcr.io/cirruslabs/android-sdk:36` (base image)
+### `debian:bookworm-slim` (base image)
 
-The Flutter image is built `FROM ghcr.io/cirruslabs/android-sdk:36`. That image is part of the same wound-down Cirrus Labs project as the upstream Flutter image. The tag `:36` is pinned and continues to be served by GHCR for now, but:
-
-- it will not receive further Android SDK version bumps from upstream
-- if the package is ever deleted, builds here will start failing with `manifest unknown`
-
-When that happens, the `FROM` line in [`sdk/Dockerfile`](./sdk/Dockerfile) needs to be repointed at an alternative — either a fork of the Android image, or a different base image that provides the Android SDK that `flutter doctor --android-licenses` and `flutter precache --android` need.
+Debian 12 is supported until mid-2028 (LTS). Bump to the next stable (`trixie`) when convenient;
+the only requirement is a glibc new enough for the prebuilt Dart SDK, plus the handful of packages
+installed in the Dockerfile.
 
 ### Flutter's release index
 
-`scripts/update_flutter_versions.sh` reads `https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json`. If Flutter ever moves or restructures that feed, the script needs updating. The JSON shape it depends on is:
+`scripts/set_flutter_version.sh` reads
+`https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json`. The JSON shape
+it depends on:
 
 - `.current_release.<channel>` → commit hash
 - `.releases[] | select(.hash == <hash>) | .version` → version string
+- `.releases[].version` → the set of valid pins
+
+### Flutter tool flags used at build time
+
+The Dockerfile calls `flutter --disable-telemetry`, `flutter config --no-enable-android …` and
+`flutter precache --web`. Flutter occasionally renames these. Since the version is pinned, a rename
+can only break the build when the pin moves — which is exactly when you will see it fail.
 
 ### Third-party GitHub Actions
 
-`build-and-push.yml` uses `jlumbroso/free-disk-space@main` (unpinned). If you prefer supply-chain pinning, replace `@main` with a commit SHA. The other actions (`docker/setup-qemu-action`, `docker/setup-buildx-action`, `docker/login-action`, `docker/build-push-action`, `actions/checkout`) are pinned to major versions.
+`actions/checkout`, `docker/setup-buildx-action`, `docker/login-action` and
+`docker/build-push-action` are pinned to major versions. Pin to commit SHAs if you want stricter
+supply-chain guarantees.
 
 ## Maintenance checklist
 
-Expect occasional human attention when:
+Expect human attention when:
 
-- **A Flutter release breaks the build.** Inspect the failing job in **Build and push Docker images**. Fix `sdk/Dockerfile` (e.g. Flutter adds a new precache requirement, changes its repository layout, or drops support for the current Dart/Android baseline) and push.
-- **The Android base image changes or disappears.** Bump the `FROM` tag in `sdk/Dockerfile` to a newer `android-sdk` image if one becomes available, or repoint to a replacement registry as described above.
-- **Flutter changes its release feed.** Update `scripts/update_flutter_versions.sh`.
-- **A new channel needs tracking** (e.g. you want to publish `dev` or `master` builds). Add it to the matrix produced in `scripts/update_flutter_versions.sh` and to the `images` array in `versions.json`.
-- **Build runs exhaust disk space.** The `jlumbroso/free-disk-space` step is generous already; if it stops being enough, drop more of its `false` flags to `true`, or split arm64 onto a dedicated runner.
-- **GitHub deprecates a workflow API used here.** Most commonly: `actions/checkout` and `docker/*` action major versions, or the `type=gha` cache backend.
+- **A Flutter bump breaks the build.** The smoke test will catch it; inspect the failing job, fix
+  `sdk/Dockerfile`, push.
+- **Debian's base tag goes EOL.** Bump the `FROM` line.
+- **Flutter changes its release feed.** Update `scripts/set_flutter_version.sh`.
+- **A consuming project needs a platform this image dropped.** That is a different image — do not
+  add the Android SDK back here; publish a second Dockerfile instead.

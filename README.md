@@ -1,52 +1,115 @@
-# Docker Images for [Flutter](https://flutter.dev/)
+# Flutter Docker image — web only
 
-[![Build and push Docker images](https://github.com/adrianjagielak/docker-images-flutter/actions/workflows/build-and-push.yml/badge.svg)](https://github.com/adrianjagielak/docker-images-flutter/actions/workflows/build-and-push.yml)
-[![Check Flutter versions](https://github.com/adrianjagielak/docker-images-flutter/actions/workflows/check-flutter-versions.yml/badge.svg)](https://github.com/adrianjagielak/docker-images-flutter/actions/workflows/check-flutter-versions.yml)
+[![Build and push Docker images](https://github.com/PauloGrijp/docker-images-flutter-only-web/actions/workflows/build-and-push.yml/badge.svg)](https://github.com/PauloGrijp/docker-images-flutter-only-web/actions/workflows/build-and-push.yml)
 
-Pre-built Docker images of the Flutter SDK, suitable for CI and local builds.
+Docker image with the Flutter SDK and **only the web toolchain**, built for use as the
+`container:` of a GitHub Actions job.
 
-This is a community continuation of [`cirruslabs/docker-images-flutter`](https://github.com/cirruslabs/docker-images-flutter), which Cirrus Labs stopped updating in May 2026. The images and tag scheme here are intended to be drop-in compatible — change the registry prefix and existing workflows should keep working.
+No Android SDK, no iOS toolchain, no desktop toolchain — so it is a fraction of the size of a
+full Flutter image, pulls in seconds on CI, and does not depend on the wound-down
+`cirruslabs/android-sdk` base image. If you need to build APKs, this is the wrong image.
 
-## Usage
-
-Run `flutter test` against the current working directory:
-
-```bash
-docker run --rm -it -v "${PWD}:/build" --workdir /build \
-    ghcr.io/adrianjagielak/flutter:stable \
-    flutter test
+```
+ghcr.io/paulogrijp/flutter-web:3.44.8
 ```
 
-Pull a specific Flutter version:
+Built for `linux/amd64` only, which is what every GitHub-hosted runner is.
 
-```bash
-docker pull ghcr.io/adrianjagielak/flutter:3.41.9
+## Using it in your project
+
+Point a job's `container:` at the image and run Flutter directly — no `subosito/flutter-action`,
+no SDK download, no cache warm-up:
+
+```yaml
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: ghcr.io/paulogrijp/flutter-web:3.44.8
+    steps:
+      - uses: actions/checkout@v6
+
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+      - run: flutter build web --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-build
+          path: build/web
 ```
 
-## Available tags
+Speed up repeat runs by caching the pub cache (the image sets `PUB_CACHE=/opt/pub-cache`):
 
-Channel tags float to the latest release on that channel and are refreshed automatically:
+```yaml
+      - uses: actions/cache@v4
+        with:
+          path: /opt/pub-cache
+          key: pub-${{ hashFiles('**/pubspec.lock') }}
+          restore-keys: pub-
+```
 
-| Tag      | Tracks                              |
-| -------- | ----------------------------------- |
-| `latest` | latest Flutter **stable**           |
-| `stable` | latest Flutter **stable**           |
-| `beta`   | latest Flutter **beta** pre-release |
+If the package is private, the job needs credentials:
 
-In addition, every build is tagged with its exact Flutter version (e.g. `3.41.9`, `3.44.0-0.3.pre`). `+` characters in pre-release versions are normalized to `-` so the tag is valid in OCI references.
+```yaml
+    container:
+      image: ghcr.io/paulogrijp/flutter-web:3.44.8
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+```
 
-Images are built for `linux/amd64` and `linux/arm64`.
+Making the GHCR package public (see [`MAINTAINING.md`](./MAINTAINING.md)) removes that need.
 
-For the full set of published image tags, see the package page on [GHCR](https://github.com/adrianjagielak/docker-images-flutter/pkgs/container/flutter).
+Running it outside Actions works the same way:
+
+```bash
+docker run --rm -it -v "${PWD}:/build" ghcr.io/paulogrijp/flutter-web:3.44.8 \
+    flutter build web --release
+```
+
+## Tags
+
+| Tag      | Points at                       |
+| -------- | ------------------------------- |
+| `3.44.8` | exactly that Flutter release    |
+| `3.44`   | the pinned release of that minor|
+| `latest` | the currently pinned release    |
+
+Pin the exact version (`3.44.8`) in a project you care about — `latest` and the minor alias move
+whenever the pin in [`versions.json`](./versions.json) changes.
+
+The published version does **not** follow Flutter stable automatically. It moves only when
+someone edits `versions.json` or runs the **Bump Flutter version** workflow.
 
 ## What's in the image
 
-Each image is layered on the Android SDK image, clones the requested Flutter ref, accepts the Android SDK licenses, and runs `flutter precache --android`. The Dart SDK is on `PATH` via `${FLUTTER_HOME}/bin/cache/dart-sdk/bin`.
+- Debian 12 (bookworm-slim) + `ca-certificates`, `curl`, `git`, `unzip`, `xz-utils`, `zip`
+- Flutter SDK at `/opt/flutter` (shallow clone of the release tag), Dart SDK on `PATH`
+- `flutter precache --web` already run, so the web artifacts (including CanvasKit) ship in the image
+- Android / iOS / desktop disabled in the Flutter config
+- `PUB_CACHE=/opt/pub-cache`, `XDG_CONFIG_HOME=/opt/flutter-config` (stable even though Actions
+  overrides `HOME` for container jobs), default workdir `/build`
+- Telemetry disabled; the root-shell warning from the `flutter` wrapper is suppressed
 
-## Package
+Every build is smoke-tested before it is considered good: the workflow pulls the pushed image and
+runs `flutter create` → `pub get` → `analyze` → `build web --release` inside it.
 
-GHCR: <https://github.com/adrianjagielak/docker-images-flutter/pkgs/container/flutter>
+The image runs as `root`, which is the default for Actions container jobs.
+
+## Origin
+
+Forked from [`adrianjagielak/docker-images-flutter`](https://github.com/adrianjagielak/docker-images-flutter)
+(itself a community continuation of `cirruslabs/docker-images-flutter`) and reduced to a
+single-version, web-only, amd64-only image.
 
 ## Maintaining this repository
 
-See [`MAINTAINING.md`](./MAINTAINING.md) for how the build automation works, first-time setup, dependencies that may need attention over time, and the long-term maintenance checklist.
+See [`MAINTAINING.md`](./MAINTAINING.md).
