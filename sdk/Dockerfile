@@ -18,12 +18,14 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # git  -> required by the flutter tool itself and by git-sourced pub packages
 # curl -> artifact downloads performed by the flutter tool
+# openssh-client -> pub dependencies hosted in private git repos over SSH
 # unzip/xz-utils/zip -> archive formats the flutter tool unpacks
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         git \
+        openssh-client \
         unzip \
         xz-utils \
         zip \
@@ -54,7 +56,10 @@ RUN git clone --depth 1 --branch "${flutter_version}" https://github.com/flutter
 # out to git inside both its own checkout and the project directory.
 RUN git config --system --add safe.directory '*'
 
-RUN flutter --disable-telemetry \
+# The flag is --disable-analytics, not --disable-telemetry: the flutter tool
+# still names the global flag after analytics even though its help text says
+# telemetry (see FlutterGlobalOptions.kDisableAnalyticsFlag).
+RUN flutter --disable-analytics \
     && flutter config \
         --enable-web \
         --no-enable-android \

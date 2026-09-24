@@ -91,7 +91,7 @@ someone edits `versions.json` or runs the **Bump Flutter version** workflow.
 
 ## What's in the image
 
-- Debian 12 (bookworm-slim) + `ca-certificates`, `curl`, `git`, `unzip`, `xz-utils`, `zip`
+- Debian 12 (bookworm-slim) + `ca-certificates`, `curl`, `git`, `openssh-client`, `unzip`, `xz-utils`, `zip`
 - Flutter SDK at `/opt/flutter` (shallow clone of the release tag), Dart SDK on `PATH`
 - `flutter precache --web` already run, so the web artifacts (including CanvasKit) ship in the image
 - Android / iOS / desktop disabled in the Flutter config
