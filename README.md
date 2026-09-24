@@ -68,6 +68,9 @@ If the package is private, the job needs credentials:
 
 Making the GHCR package public (see [`MAINTAINING.md`](./MAINTAINING.md)) removes that need.
 
+A complete, working example — Flutter web build plus a Firebase Hosting deploy, with private pub
+dependencies over SSH — is in [`examples/firebase-web-deploy.yml`](./examples/firebase-web-deploy.yml).
+
 Running it outside Actions works the same way:
 
 ```bash

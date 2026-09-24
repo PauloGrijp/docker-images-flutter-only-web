@@ -1,0 +1,108 @@
+# Example consumer workflow: build a Flutter web app inside the image published
+# by this repository and deploy it to Firebase Hosting.
+#
+# Copy this into your app repository as .github/workflows/<name>.yml.
+
+name: Run Debug Web app distribution on Firebase
+
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: "Select app to deploy:"
+        required: true
+        default: qualifica
+        type: choice
+        options:
+          - appostilas
+          - qualifica
+      env:
+        description: "Select API environment:"
+        required: true
+        default: debug
+        type: choice
+        options:
+          - debug
+          - release
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_qa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: ghcr.io/paulogrijp/flutter-web:3.44.8
+
+    env:
+      APP: ${{ inputs.app }}
+      FIREBASE_PROJECT_ID: mlearn-teste
+      FIREBASE_HOSTING_TARGET: >-
+        ${{ inputs.app == 'appostilas' && 'hosting:appostilas-debug'
+         || 'hosting:qualifica-debug' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # firebase-tools needs Node; installing it from the tool cache is much
+      # faster and more predictable than apt + `n stable` inside the container.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools
+
+      - name: Set up SSH to access private repos
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add GitHub to known_hosts
+        # Container jobs run with HOME=/github/home, not /root, so write the
+        # known_hosts file where ssh will actually look for it.
+        run: |
+          mkdir -p "$HOME/.ssh"
+          ssh-keyscan github.com >> "$HOME/.ssh/known_hosts"
+
+      - name: Cache pub packages
+        uses: actions/cache@v4
+        with:
+          path: /opt/pub-cache
+          key: pub-${{ runner.os }}-${{ hashFiles('**/pubspec.lock') }}
+          restore-keys: pub-${{ runner.os }}-
+
+      - name: Resolve dependencies
+        run: flutter pub get
+
+      - name: Run config script
+        run: dart run .config/_core/scripts/config/config.dart --flavor "$APP" --env "${{ inputs.env }}"
+
+      # canvaskit is the default renderer for JS builds in Flutter 3.44; the
+      # old `--web-renderer` option (and the bare `canvaskit` argument) no
+      # longer exists. Pass `--wasm` if you ever want skwasm instead.
+      - name: Build web
+        run: |
+          flutter build web \
+            --release \
+            --output="build/web/$APP" \
+            --target=lib/main/web_main.dart \
+            --dart-define=flavor="$APP" \
+            --dart-define-from-file=.env/env.json
+
+      - name: Publish assetlinks.json
+        run: dart run ./scripts/_build/copy_web_assetlinks.dart "$APP" "build/web/$APP"
+
+      - name: Deploy to Firebase Hosting
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+        run: |
+          firebase deploy \
+            --only "$FIREBASE_HOSTING_TARGET" \
+            --project "$FIREBASE_PROJECT_ID" \
+            --message "GitHub Actions run ${{ github.run_id }}, attempt ${{ github.run_attempt }}" \
+            --non-interactive
