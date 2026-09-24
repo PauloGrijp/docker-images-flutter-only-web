@@ -56,6 +56,11 @@ RUN git clone --depth 1 --branch "${flutter_version}" https://github.com/flutter
 # out to git inside both its own checkout and the project directory.
 RUN git config --system --add safe.directory '*'
 
+# Existing pipelines append host keys to /root/.ssh/known_hosts before cloning
+# private pub dependencies. The full Flutter images this one replaces carried
+# that directory; debian-slim does not, and the redirect fails without it.
+RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh
+
 # The flag is --disable-analytics, not --disable-telemetry: the flutter tool
 # still names the global flag after analytics even though its help text says
 # telemetry (see FlutterGlobalOptions.kDisableAnalyticsFlag).
